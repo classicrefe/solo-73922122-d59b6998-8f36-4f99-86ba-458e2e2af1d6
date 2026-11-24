@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}未找到 · 晶圆缺陷坐标复查{% endblock %}
+{% block body %}
+<section class="panel">
+  <h2>没有这条记录</h2>
+  <p class="muted">晶圆可能已被删除。</p>
+  <a class="button" href="{{ url_for('index') }}">返回列表</a>
+</section>
+{% endblock %}

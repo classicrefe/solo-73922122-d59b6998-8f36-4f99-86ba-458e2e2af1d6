@@ -1,0 +1,16 @@
+services:
+  wafer-review:
+    build: .
+    image: wafer-review:local
+    container_name: wafer-review
+    ports:
+      - "8000:8000"
+    environment:
+      WAFER_DB: /data/wafer_review.sqlite3
+      WAFER_SECRET: ${WAFER_SECRET:-local-demo-secret}
+    volumes:
+      - wafer-data:/data
+    restart: unless-stopped
+
+volumes:
+  wafer-data:

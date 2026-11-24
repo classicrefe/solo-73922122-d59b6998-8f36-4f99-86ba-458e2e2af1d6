@@ -1,0 +1,17 @@
+{% macro render_grid(grid) %}
+<div class="wafer-grid" style="--n: {{ grid.n }}">
+  <div class="axis-corner"></div>
+  {% for c in range(1, grid.n + 1) %}<div class="axis">{{ c }}</div>{% endfor %}
+  {% for row in grid.rows %}
+    {% set ri = loop.index %}
+    <div class="axis">{{ ri }}</div>
+    {% for cell in row %}
+      <div class="cell" title="第 {{ ri }} 行 · 第 {{ loop.index }} 列">
+        {% for mark in cell %}
+          <span class="mark {{ mark.kind }}{% if mark.muted %} muted-mark{% endif %}" title="{{ mark.label }}">{{ mark.label }}</span>
+        {% endfor %}
+      </div>
+    {% endfor %}
+  {% endfor %}
+</div>
+{% endmacro %}

@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% from "_macros.html" import render_grid %}
+{% block title %}{{ wafer.name }} · 晶圆缺陷坐标复查{% endblock %}
+{% block body %}
+<section class="panel">
+  <div class="panel-head">
+    <div>
+      <h2>{{ wafer.name }}</h2>
+      <p class="muted small">
+        {{ wafer.grid_size }} × {{ wafer.grid_size }} 格 ·
+        {{ wafer.steps|length }} 道工序 ·
+        {% if feasibility.solvable %}
+          <span class="badge ok">共 {{ feasibility.scheme_count }} 套可行方案</span>
+        {% else %}
+          <span class="badge bad">无解</span>
+        {% endif %}
+        · 修订 r{{ wafer.revision }}
+        · 生成耗时 {{ '%.1f'|format(feasibility.elapsed_ms) }} ms
+      </p>
+    </div>
+    <a class="button ghost" href="{{ url_for('index') }}">返回列表</a>
+  </div>
+
+  {% if not feasibility.solvable %}
+  <div class="flash error">
+    当前定位点找不到任何能让同号点全部重合的方案。请更正或撤去定位点；在成功保存前，页面沿用原定位点。
+  </div>
+  {% endif %}
+
+  <h3>各工序可行变换</h3>
+  <table class="table compact">
+    <thead>
+      <tr><th>#</th><th>工序</th><th>可行变换</th><th>跨工序同号定位点</th></tr>
+    </thead>
+    <tbody>
+      {% for f in feasibility.steps %}
+        {% set step = wafer.steps[loop.index0] %}
+        <tr {% if selected and step.id == selected.id %}class="selected"{% endif %}>
+          <td>{{ step.seq }}</td>
+          <td>
+            <a href="{{ url_for('wafer_detail', wafer_id=wafer.id, step=step.id, did=queried_did or None) }}">{{ step.name }}</a>
+            {% if step.is_baseline %}<span class="badge base">基准</span>{% endif %}
+          </td>
+          <td>
+            {% for label in f.labels %}<span class="chip">{{ label }}</span>{% else %}<span class="badge bad">无</span>{% endfor %}
+          </td>
+          <td class="small">
+            同号点：{{ f.shared_locators|join('、') or '—' }}
+            {% if f.baseline_anchors %}<br>其中基准有同号：{{ f.baseline_anchors|join('、') }}{% endif %}
+            {% if f.unanchored_locators %}<br>仅跨工序共享：{{ f.unanchored_locators|join('、') }}{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% if selected %}
+<section class="panel">
+  <div class="panel-head">
+    <h3>工序 · {{ selected.name }}</h3>
+    <form method="get" action="{{ url_for('wafer_detail', wafer_id=wafer.id) }}" class="inline">
+      <select name="step">
+        {% for s in wafer.steps %}
+          <option value="{{ s.id }}" {% if s.id == selected.id %}selected{% endif %}>工序 {{ s.seq }} · {{ s.name }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="did" value="{{ queried_did }}" placeholder="缺陷号，如 D101">
+      <button class="button" type="submit">查坐标</button>
+    </form>
+  </div>
+
+  {% if focus %}
+  <div class="query-result {{ focus.status }}">
+    <div class="qr-title">查询 {{ focus.did }}</div>
+    {% if focus.status == 'determined' %}
+      <div class="qr-big">基准坐标：第 {{ focus.coordinate[0] }} 行 · 第 {{ focus.coordinate[1] }} 列</div>
+      <div class="muted small">
+        输入点：第 {{ focus.source_row }} 行 · 第 {{ focus.source_col }} 列；
+        在 {{ focus.feasible_transforms|length }} 种可行变换下都落在同一格。
+      </div>
+    {% elif focus.status == 'pending' %}
+      <div class="qr-big">待定</div>
+      <div class="muted small">可行变换会把该缺陷放到下列不同格子，无法唯一确定：</div>
+      <div class="chips">
+        {% for r, c in focus.candidates %}<span class="chip mono">{{ r }}-{{ c }}</span>{% endfor %}
+      </div>
+    {% else %}
+      <div class="qr-big">无解</div>
+      <div class="muted small">当前定位点下没有可行方案，因而无法给出坐标。</div>
+    {% endif %}
+  </div>
+  {% elif queried_did %}
+  <div class="flash warn">工序“{{ selected.name }}”中没有缺陷 {{ queried_did }}。</div>
+  {% endif %}
+
+  <div class="two-col">
+    <div>
+      <h4>缺陷查询结果</h4>
+      {% if results %}
+      <table class="table compact">
+        <thead><tr><th>缺陷</th><th>输入</th><th>基准坐标</th><th>状态</th></tr></thead>
+        <tbody>
+          {% for r in results %}
+          <tr class="{% if r.did == queried_did %}hit{% endif %}">
+            <td><a href="{{ url_for('wafer_detail', wafer_id=wafer.id, step=selected.id, did=r.did) }}">{{ r.did }}</a></td>
+            <td class="mono">{{ r.source_row }}-{{ r.source_col }}</td>
+            <td class="mono">
+              {% if r.status == 'determined' %}{{ r.coordinate[0] }}-{{ r.coordinate[1] }}
+              {% elif r.status == 'pending' %}<span class="badge warn">待定</span>
+              {% else %}<span class="badge bad">无解</span>{% endif %}
+            </td>
+            <td class="small">
+              {% if r.status == 'pending' %}
+                候选 {{ r.candidates|length }} 格
+              {% elif r.status == 'determined' %}
+                可行变换 {{ r.feasible_transforms|length }} 种
+              {% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">这道工序没有缺陷行。查询结果无需扫描缺陷明细，改动定位点后本表会立即重算。</p>
+      {% endif %}
+    </div>
+
+    <div>
+      <h4>定位点</h4>
+      <table class="table compact">
+        <thead><tr><th>编号</th><th>行</th><th>列</th><th>更正 / 撤去</th></tr></thead>
+        <tbody>
+          {% for loc in selected.locators %}
+          <tr>
+            <td class="mono">{{ loc.pid }}</td>
+            <td colspan="2">
+              <form method="post" action="{{ url_for('correct', wafer_id=wafer.id, locator_id=loc.id) }}" class="inline tight">
+                <input type="hidden" name="step" value="{{ selected.id }}">
+                <input type="hidden" name="did" value="{{ queried_did }}">
+                <input type="number" name="row" value="{{ loc.row }}" min="1" max="{{ wafer.grid_size }}" required>
+                <input type="number" name="col" value="{{ loc.col }}" min="1" max="{{ wafer.grid_size }}" required>
+                <button class="button small" type="submit">更正</button>
+              </form>
+            </td>
+            <td>
+              <form method="post" action="{{ url_for('remove', wafer_id=wafer.id, locator_id=loc.id) }}"
+                    onsubmit="return confirm('撤去定位点 {{ loc.pid }}？若撤去后无可行方案，改动不会生效。');">
+                <input type="hidden" name="step" value="{{ selected.id }}">
+                <input type="hidden" name="did" value="{{ queried_did }}">
+                <button class="linkish danger" type="submit">撤去</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4" class="muted">该工序没有定位点。</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <form method="post" action="{{ url_for('add', wafer_id=wafer.id) }}" class="inline add-locator">
+        <input type="hidden" name="step_id" value="{{ selected.id }}">
+        <input type="hidden" name="step" value="{{ selected.id }}">
+        <input type="hidden" name="did" value="{{ queried_did }}">
+        <input type="text" name="pid" placeholder="编号" maxlength="20" required>
+        <input type="number" name="row" placeholder="行" min="1" max="{{ wafer.grid_size }}" required>
+        <input type="number" name="col" placeholder="列" min="1" max="{{ wafer.grid_size }}" required>
+        <button class="button small ghost" type="submit">补点</button>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="two-col">
+    <div>
+      <h4>{{ selected.name }} · 输入的坐标（工序图）</h4>
+      {{ render_grid(grid) }}
+    </div>
+    <div>
+      <h4>换算到基准图（取第一个可行变换示意）</h4>
+      {% if mapped %}
+        {{ render_grid(mapped) }}
+        <p class="muted small">
+          示意用变换：{{ mapped_label }}。缺陷的实际查询结果以上表为准；待定的缺陷在这里只画一个可能的落点。
+        </p>
+      {% else %}
+        <p class="muted">无可行方案，无法换算。</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <h4>全部工序叠加到基准坐标系</h4>
+  <p class="muted small">
+    基准工序按原坐标画；其余工序取各自的第一个可行变换换算后叠加（<span class="mono">D101</span>
+    为基准缺陷，紫色为其他工序的缺陷）。虚化的缺陷为待定，只表示一个可能的落点。
+  </p>
+  {{ render_grid(overlay) }}
+  <div class="legend">
+    <span class="mark locator">定位点</span>
+    <span class="mark defect">基准缺陷</span>
+    <span class="mark overlay">其他工序缺陷</span>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

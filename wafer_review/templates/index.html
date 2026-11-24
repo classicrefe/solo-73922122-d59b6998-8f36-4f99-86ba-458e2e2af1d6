@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}晶圆缺陷坐标复查{% endblock %}
+{% block body %}
+<section class="hero">
+  <h1>晶圆缺陷坐标复查</h1>
+  <p class="lede">
+    把各道工序的缺陷，用同号定位点对齐到第一张基准图的晶粒网格上。
+    只有<strong>所有可行方案</strong>都指向同一格时，才给出基准坐标；否则标为待定。
+  </p>
+</section>
+
+{% if summaries %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>已建立记录</h2>
+    <a class="button" href="{{ url_for('new_wafer') }}">新建复查</a>
+  </div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>晶圆</th>
+        <th>每边格数</th>
+        <th>工序数</th>
+        <th>缺陷行数</th>
+        <th>可行方案</th>
+        <th>修订</th>
+        <th>更新时间</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in summaries %}
+      <tr>
+        <td><a href="{{ url_for('wafer_detail', wafer_id=row.wafer.id) }}">{{ row.wafer.name }}</a></td>
+        <td>{{ row.wafer.grid_size }} × {{ row.wafer.grid_size }}</td>
+        <td>{{ row.wafer.steps|length }}</td>
+        <td>{{ row.defect_total }}</td>
+        <td>
+          {% if row.solvable %}
+            <span class="badge ok">{{ row.scheme_count }} 套</span>
+          {% else %}
+            <span class="badge bad">无解</span>
+          {% endif %}
+        </td>
+        <td>r{{ row.wafer.revision }}</td>
+        <td class="muted">{{ row.wafer.updated_at }}</td>
+        <td>
+          <form method="post" action="{{ url_for('delete', wafer_id=row.wafer.id) }}"
+                onsubmit="return confirm('确定删除这条晶圆记录及其全部定位点、缺陷吗？');">
+            <button class="linkish danger" type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<section class="panel empty">
+  <h2>还没有记录</h2>
+  <p>上传最多 {{ max_steps }} 道工序的 CSV，第一张图作为基准。</p>
+  <a class="button" href="{{ url_for('new_wafer') }}">新建复查</a>
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>CSV 格式</h2>
+  <p>每行一个定位点或缺陷，字段为“类型, 编号, 行, 列”，行与列均从 1 起算。</p>
+  <pre class="code">类型,编号,行,列
+定位点,L1,2,7
+定位点,L2,2,6
+缺陷,D101,4,4</pre>
+  <p class="muted">
+    类型可写“定位点 / 缺陷”，也接受 <code>locator / defect</code> 或 <code>L / D</code>。
+    同一个定位点编号在每道工序里代表同一枚物理标记；某道工序缺某个编号时，该编号对它不构成约束。
+  </p>
+</section>
+{% endblock %}

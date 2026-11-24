@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}新建复查 · 晶圆缺陷坐标复查{% endblock %}
+{% block body %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>新建复查</h2>
+    <div class="inline">
+      <form method="post" action="{{ url_for('create_demo') }}">
+        <button class="button ghost" type="submit">一键填入演示数据</button>
+      </form>
+      <a class="button ghost" href="{{ url_for('index') }}">返回</a>
+    </div>
+  </div>
+  <p class="muted">
+    第一道工序是基准图。其余工序可各自选择“旋转 90° 的整数倍、镜像或两者叠加”，
+    系统会枚举全部 8 种 D4 变换，找出能让同号定位点与基准重合的组合。
+    也可以直接从 <a href="{{ url_for('sample_csv', name='1') }}">样本 1</a>…
+    <a href="{{ url_for('sample_csv', name='6') }}">样本 6</a> 下载演示 CSV。
+  </p>
+
+  <form method="post" action="{{ url_for('create') }}" enctype="multipart/form-data" id="new-form">
+    <div class="grid2">
+      <label class="field">
+        <span>晶圆名称</span>
+        <input type="text" name="name" required maxlength="80" placeholder="例如 LOT-2407-A">
+      </label>
+      <label class="field">
+        <span>每边格数 <em>（行、列均为 1..N）</em></span>
+        <input type="number" name="grid_size" required min="2" max="60" value="8" id="grid-size">
+      </label>
+    </div>
+
+    <div class="steps" id="step-list">
+      {% for i in range(1, step_count + 1) %}
+      <fieldset class="step-card" data-index="{{ i }}">
+        <legend>
+          工序 {{ i }}
+          {% if i == 1 %}<span class="badge base">基准图</span>{% endif %}
+        </legend>
+        <div class="grid2">
+          <label class="field">
+            <span>工序名称</span>
+            <input type="text" name="name_{{ i }}" value="{% if i == 1 %}光刻{% elif i == 2 %}刻蚀{% elif i == 3 %}沉积{% endif %}" maxlength="40">
+          </label>
+          <label class="field">
+            <span>CSV 文件{% if i > 1 %}<em>（可选，也可直接粘贴）</em>{% endif %}</span>
+            <input type="file" name="csv_{{ i }}" accept=".csv,text/csv">
+          </label>
+        </div>
+        <label class="field">
+          <span>或粘贴 CSV 内容</span>
+          <textarea name="csv_text_{{ i }}" rows="6" spellcheck="false" placeholder="类型,编号,行,列&#10;定位点,L1,2,7&#10;缺陷,D101,4,4"></textarea>
+        </label>
+        {% if i > 1 %}
+        <button type="button" class="linkish danger remove-step">移除该工序</button>
+        {% endif %}
+      </fieldset>
+      {% endfor %}
+    </div>
+
+    <div class="actions">
+      <button type="button" class="button ghost" id="add-step">＋ 添加工序</button>
+      <button type="submit" class="button">保存并校验</button>
+    </div>
+    <p class="muted small">
+      最多 {{ max_steps }} 道工序。任一道工序的定位点无法与基准对齐时，整次上传不会保存。
+    </p>
+  </form>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+  const list = document.getElementById('step-list');
+  const addBtn = document.getElementById('add-step');
+  const MAX = {{ max_steps }};
+
+  const renumber = () => {
+    [...list.querySelectorAll('.step-card')].forEach((card, idx) => {
+      const n = idx + 1;
+      card.dataset.index = n;
+      card.querySelector('legend').innerHTML =
+        `工序 ${n}` + (n === 1 ? ' <span class="badge base">基准图</span>' : '');
+      const rm = card.querySelector('.remove-step');
+      if (rm) rm.style.display = n === 1 ? 'none' : '';
+    });
+    addBtn.disabled = list.querySelectorAll('.step-card').length >= MAX;
+  };
+
+  const fileInputs = (card) => card.querySelectorAll('input[type=file]');
+  const textAreas = (card) => card.querySelectorAll('textarea');
+  const nameInputs = (card) => card.querySelectorAll('input[type=text]');
+
+  const dropEmpty = () => {
+    [...list.querySelectorAll('.step-card')].forEach((card, idx) => {
+      const i = idx + 1;
+      fileInputs(card).forEach(el => (el.name = `csv_${i}`));
+      textAreas(card).forEach(el => (el.name = `csv_text_${i}`));
+      nameInputs(card).forEach(el => (el.name = `name_${i}`));
+    });
+  };
+
+  addBtn.addEventListener('click', () => {
+    const cards = [...list.querySelectorAll('.step-card')];
+    if (cards.length >= MAX) return;
+    const tpl = cards[cards.length - 1].cloneNode(true);
+    // 清空 clone 中的内容，避免重复提交旧数据
+    fileInputs(tpl).forEach(el => (el.value = ''));
+    textAreas(tpl).forEach(el => (el.value = ''));
+    nameInputs(tpl).forEach(el => (el.value = ''));
+    list.appendChild(tpl);
+    renumber();
+    dropEmpty();
+  });
+
+  list.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('.remove-step');
+    if (!btn) return;
+    const card = btn.closest('.step-card');
+    if ([...list.querySelectorAll('.step-card')].length <= 1) return;
+    card.remove();
+    renumber();
+    dropEmpty();
+  });
+
+  renumber();
+})();
+</script>
+{% endblock %}
