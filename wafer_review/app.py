@@ -17,8 +17,16 @@ from flask import (
 from .db import connect, init_db
 from .display import mapped_grid, transform_label
 from .gridview import build_grid
-from .model import NoSolutionError, WaferError, analyze
+from .model import DIFFERENT_CELL, NO_SOLUTION, SAME_CELL, NoSolutionError, WaferError, analyze
 from .overlay import compare_grid
+from .pairs import (
+    CONFIRMED,
+    PENDING,
+    delete_pair,
+    list_pairs,
+    upsert_pair,
+    verdicts_for,
+)
 from .service import (
     MAX_STEPS,
     StepInput,
@@ -176,6 +184,21 @@ def create_app(test_config: dict | None = None) -> Flask:
                 mapped = mapped_grid(selected, transforms[0], wafer.grid_size)
                 mapped_label = transform_label(transforms[0])
 
+        with connect(app.config["DATABASE"]) as _pair_conn:
+            pair_records = list_pairs(_pair_conn, wafer.id)
+        live_verdicts = verdicts_for(wafer, pair_records)
+        pair_rows = [
+            {
+                "record": rec,
+                "step_a": wafer.step_by_id(rec.step_id_a),
+                "step_b": wafer.step_by_id(rec.step_id_b),
+                "live": live_verdicts.get(rec.id),
+                "can_reconfirm": rec.status == PENDING
+                and live_verdicts.get(rec.id) == SAME_CELL,
+            }
+            for rec in pair_records
+        ]
+
         return render_template(
             "wafer.html",
             wafer=wafer,
@@ -188,6 +211,8 @@ def create_app(test_config: dict | None = None) -> Flask:
             mapped=mapped,
             mapped_label=mapped_label,
             overlay=compare_grid(analysis),
+            pair_rows=pair_rows,
+            pair_statuses=(CONFIRMED, PENDING, SAME_CELL, DIFFERENT_CELL, NO_SOLUTION),
         )
 
     def _back(wafer_id: int, step: str, did: str):
@@ -207,13 +232,16 @@ def create_app(test_config: dict | None = None) -> Flask:
         did: str,
     ):
         try:
-            action()
+            demoted = action()
         except NoSolutionError as exc:
             flash(f"未生效：{exc}", "error")
         except (WaferError, OSError, sqlite3.Error) as exc:
             flash(f"{failure_prefix}：{exc}；已沿用原定位点和原结果", "error")
         else:
-            flash(success, "ok")
+            message = success
+            if demoted:
+                message += f"；{demoted} 条已确认的同格记录失去依据，已转为待复核"
+            flash(message, "ok")
         return _back(wafer_id, step, did)
 
     @app.post("/wafers/<int:wafer_id>/locators/<int:locator_id>/correct")
@@ -268,6 +296,119 @@ def create_app(test_config: dict | None = None) -> Flask:
             step,
             did,
         )
+
+    @app.post("/wafers/<int:wafer_id>/pairs")
+    def pair_create(wafer_id: int):
+        step = request.form.get("step", "")
+        did = request.form.get("did", "")
+        try:
+            step_id_a = int(request.form.get("pair_step_a", ""))
+            step_id_b = int(request.form.get("pair_step_b", ""))
+        except ValueError:
+            flash("未生效：请选择两道工序", "error")
+            return _back(wafer_id, step, did)
+        defect_a = request.form.get("pair_defect_a", "")
+        defect_b = request.form.get("pair_defect_b", "")
+        with connect(app.config["DATABASE"]) as conn:
+            wafer = load_wafer(conn, wafer_id)
+            if wafer is None:
+                abort(404)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                _rec, verdict = upsert_pair(
+                    conn, wafer, step_id_a, defect_a, step_id_b, defect_b
+                )
+                conn.execute("COMMIT")
+            except (WaferError, OSError, sqlite3.Error) as exc:
+                conn.execute("ROLLBACK")
+                flash(f"同格复查未保存：{exc}", "error")
+                return _back(wafer_id, step, did)
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        if verdict == SAME_CELL:
+            flash("已确认同格：两套记录在每套可行方案下都落在同一格", "ok")
+        else:
+            flash(
+                "已登记为待复核：存在让两条记录落到不同格的可行方案，暂不能确认同格",
+                "warn",
+            )
+        return _back(wafer_id, step, did)
+
+    @app.post("/wafers/<int:wafer_id>/pairs/<int:pair_id>/reconfirm")
+    def pair_reconfirm(wafer_id: int, pair_id: int):
+        step = request.form.get("step", "")
+        did = request.form.get("did", "")
+        with connect(app.config["DATABASE"]) as conn:
+            wafer = load_wafer(conn, wafer_id)
+            if wafer is None:
+                abort(404)
+            record = next((r for r in list_pairs(conn, wafer_id) if r.id == pair_id), None)
+            if record is None:
+                flash("复查记录不存在", "error")
+                return _back(wafer_id, step, did)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                _rec, verdict = upsert_pair(
+                    conn,
+                    wafer,
+                    record.step_id_a,
+                    record.defect_a,
+                    record.step_id_b,
+                    record.defect_b,
+                )
+                conn.execute("COMMIT")
+            except (WaferError, OSError, sqlite3.Error) as exc:
+                conn.execute("ROLLBACK")
+                flash(f"重新确认失败：{exc}", "error")
+                return _back(wafer_id, step, did)
+        if verdict == SAME_CELL:
+            flash("已重新确认同格", "ok")
+        else:
+            flash("当前定位点下仍不满足每套方案都同格，保持待复核", "warn")
+        return _back(wafer_id, step, did)
+
+    @app.post("/wafers/<int:wafer_id>/pairs/<int:pair_id>/delete")
+    def pair_delete(wafer_id: int, pair_id: int):
+        step = request.form.get("step", "")
+        did = request.form.get("did", "")
+        with connect(app.config["DATABASE"]) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                delete_pair(conn, wafer_id, pair_id)
+                conn.execute("COMMIT")
+            except (WaferError, OSError, sqlite3.Error) as exc:
+                conn.execute("ROLLBACK")
+                flash(f"删除失败：{exc}", "error")
+                return _back(wafer_id, step, did)
+        flash("复查记录已删除", "ok")
+        return _back(wafer_id, step, did)
+
+    @app.get("/api/wafers/<int:wafer_id>/pairs")
+    def api_pairs(wafer_id: int):
+        with connect(app.config["DATABASE"]) as conn:
+            wafer = load_wafer(conn, wafer_id)
+            if wafer is None:
+                abort(404)
+            records = list_pairs(conn, wafer_id)
+        verdicts = verdicts_for(wafer, records)
+        return {
+            "wafer": wafer.name,
+            "revision": wafer.revision,
+            "pairs": [
+                {
+                    "id": rec.id,
+                    "status": rec.status,
+                    "step_a": wafer.step_by_id(rec.step_id_a).name,
+                    "defect_a": rec.defect_a,
+                    "step_b": wafer.step_by_id(rec.step_id_b).name,
+                    "defect_b": rec.defect_b,
+                    "live_verdict": verdicts.get(rec.id),
+                    "updated_at": rec.updated_at,
+                }
+                for rec in records
+            ],
+        }
 
     @app.post("/wafers/<int:wafer_id>/delete")
     def delete(wafer_id: int):

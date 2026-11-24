@@ -55,6 +55,96 @@
   </table>
 </section>
 
+<section class="panel" id="pair-review">
+  <div class="panel-head">
+    <h3>同格复查（跨工序缺陷对）</h3>
+  </div>
+  <p class="muted small">
+    选同片晶圆的<strong>两道不同工序</strong>，各填一个缺陷编号。只有<strong>每套全局可行方案</strong>
+    都把两条记录换算到基准坐标系的同一格，才能确认同格；落在哪一格可随方案变化。同一对只保留一条
+    记录，交换两道工序的填写顺序视为同一对。补点、改点或撤点后，已确认的记录若失去同格依据会自动
+    转为待复核，即使之后又能判同格，也须在此重新确认。
+  </p>
+  <form method="post" action="{{ url_for('pair_create', wafer_id=wafer.id) }}" class="pair-form">
+    <input type="hidden" name="step" value="{{ selected.id if selected else '' }}">
+    <input type="hidden" name="did" value="{{ queried_did }}">
+    <div class="pair-field">
+      <span>工序一</span>
+      <select name="pair_step_a" required>
+        {% for s in wafer.steps %}
+        <option value="{{ s.id }}">{{ s.seq }} · {{ s.name }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="pair_defect_a" placeholder="缺陷号，如 D101" maxlength="40" required>
+    </div>
+    <div class="pair-field">
+      <span>工序二</span>
+      <select name="pair_step_b" required>
+        {% for s in wafer.steps %}
+        <option value="{{ s.id }}" {% if loop.index0 == 1 %}selected{% endif %}>{{ s.seq }} · {{ s.name }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="pair_defect_b" placeholder="缺陷号，如 D101" maxlength="40" required>
+    </div>
+    <button class="button" type="submit">提交复查</button>
+  </form>
+
+  <h4>已确认与待复核记录</h4>
+  {% if pair_rows %}
+  <table class="table compact">
+    <thead>
+      <tr><th>记录</th><th>确认状态</th><th>当前定位点下的即时判定</th><th>更新时间</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for row in pair_rows %}
+      {% set rec = row.record %}
+      <tr>
+        <td class="small">
+          {{ row.step_a.seq }}·{{ row.step_a.name }} <span class="mono">{{ rec.defect_a }}</span>
+          <span class="muted">⇄</span>
+          {{ row.step_b.seq }}·{{ row.step_b.name }} <span class="mono">{{ rec.defect_b }}</span>
+        </td>
+        <td>
+          {% if rec.status == 'confirmed' %}
+            <span class="badge ok">已确认同格</span>
+          {% else %}
+            <span class="badge warn">待复核</span>
+          {% endif %}
+        </td>
+        <td class="small">
+          {% if row.live == 'same_cell' %}
+            <span class="badge ok">每套方案都同格</span>
+          {% elif row.live == 'different' %}
+            <span class="badge warn">存在不同格方案</span>
+          {% else %}
+            <span class="badge bad">无可行方案</span>
+          {% endif %}
+        </td>
+        <td class="muted small mono">{{ rec.updated_at }}</td>
+        <td class="pair-actions">
+          {% if row.can_reconfirm %}
+          <form method="post" action="{{ url_for('pair_reconfirm', wafer_id=wafer.id, pair_id=rec.id) }}">
+            <input type="hidden" name="step" value="{{ selected.id if selected else '' }}">
+            <input type="hidden" name="did" value="{{ queried_did }}">
+            <button class="linkish" type="submit">重新确认</button>
+          </form>
+          {% endif %}
+          <form method="post" action="{{ url_for('pair_delete', wafer_id=wafer.id, pair_id=rec.id) }}"
+                onsubmit="return confirm('删除这条同格复查记录？');">
+            <input type="hidden" name="step" value="{{ selected.id if selected else '' }}">
+            <input type="hidden" name="did" value="{{ queried_did }}">
+            <button class="linkish danger" type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">还没有复查记录。从上方选择两道工序并各填一个缺陷号开始。</p>
+  {% endif %}
+</section>
+
 {% if selected %}
 <section class="panel">
   <div class="panel-head">

@@ -20,6 +20,7 @@ from .model import (
     Wafer,
     compute_feasibility,
 )
+from .pairs import refresh_confirmed_pairs
 
 MAX_STEPS = 6
 
@@ -163,12 +164,19 @@ def _reload(conn: sqlite3.Connection, wafer_id: int) -> Wafer:
     return wafer
 
 
-def _assert_solvable(conn: sqlite3.Connection, wafer_id: int) -> None:
+def _assert_solvable(conn: sqlite3.Connection, wafer_id: int) -> int:
+    """可行性校验 + 同格确认状态刷新，必须处于调用方的写事务内。
+
+    校验不通过会抛异常并由调用方整体回滚；通过时在同一事务里把失去同格依据
+    的已确认缺陷对降为待复核，因此“定位点变更”和“确认状态变化”要么一并
+    提交，要么一并沿用原值。返回被降为待复核的缺陷对数量。
+    """
     wafer = _reload(conn, wafer_id)
     if not compute_feasibility(wafer).solvable:
         raise NoSolutionError(
             "改动后不存在任何可行方案，已保留原定位点与原查询结果。"
         )
+    return refresh_confirmed_pairs(conn, wafer)
 
 
 def _bump(conn: sqlite3.Connection, wafer_id: int) -> None:
@@ -180,7 +188,7 @@ def _bump(conn: sqlite3.Connection, wafer_id: int) -> None:
 
 def correct_locator(
     db_path: str | Path, wafer_id: int, locator_id: int, row: int, col: int
-) -> None:
+) -> int:
     with connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -194,15 +202,16 @@ def correct_locator(
             )
             if cur.rowcount != 1:
                 raise ValidationError("定位点不存在")
-            _assert_solvable(conn, wafer_id)
+            demoted = _assert_solvable(conn, wafer_id)
             _bump(conn, wafer_id)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
+    return demoted
 
 
-def remove_locator(db_path: str | Path, wafer_id: int, locator_id: int) -> None:
+def remove_locator(db_path: str | Path, wafer_id: int, locator_id: int) -> int:
     with connect(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -213,15 +222,16 @@ def remove_locator(db_path: str | Path, wafer_id: int, locator_id: int) -> None:
             )
             if cur.rowcount != 1:
                 raise ValidationError("定位点不存在")
-            _assert_solvable(conn, wafer_id)
+            demoted = _assert_solvable(conn, wafer_id)
             _bump(conn, wafer_id)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
+    return demoted
 
 
-def add_locator(db_path: str | Path, wafer_id: int, step_id: int, pid: str, row: int, col: int) -> None:
+def add_locator(db_path: str | Path, wafer_id: int, step_id: int, pid: str, row: int, col: int) -> int:
     """在既有工序上补一个定位点（演示与纠错时有用）。"""
     pid = pid.strip()
     if not pid:
@@ -240,12 +250,13 @@ def add_locator(db_path: str | Path, wafer_id: int, step_id: int, pid: str, row:
                 "INSERT INTO locator (step_id, pid, row, col) VALUES (?, ?, ?, ?)",
                 (step_id, pid, row, col),
             )
-            _assert_solvable(conn, wafer_id)
+            demoted = _assert_solvable(conn, wafer_id)
             _bump(conn, wafer_id)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")
             raise
+    return demoted
 
 
 def delete_wafer(db_path: str | Path, wafer_id: int) -> None:

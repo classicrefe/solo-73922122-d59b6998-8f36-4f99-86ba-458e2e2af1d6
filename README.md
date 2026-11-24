@@ -4,6 +4,10 @@
 网页上传最多 6 道工序的 CSV，SQLite 保存原始记录；定位点更正/撤去后，所有受影响
 工序的查询结果一并重算；无解或保存失败时整套改动回滚。
 
+复查页还支持**跨工序缺陷“同格”复查**：选出同片晶圆的两道工序、各填一个缺陷号，
+只有在**每套全局可行方案**下两条记录都落在基准坐标系的同一格，才能确认同格；定位
+点变更后失去依据的确认记录自动转待复核，须人工重新确认。
+
 ## 快速启动
 
 ```bash
@@ -67,6 +71,35 @@ WAFER_DB=data/wafer_review.sqlite3 gunicorn --bind 0.0.0.0:8000 wsgi:app
   回滚，原定位点、原查询结果保持不变，页面给出“未生效”提示；
 * 改动成功后，所有工序的查询结果立即按新定位点重新推导，不需要重新上传。
 
+## 同格复查（跨工序缺陷对）
+
+同一颗晶粒可能在两道工序里都报了缺陷。复查页（晶圆详情页的“同格复查”面板）选同片
+晶圆的**两道不同工序**，各填一个缺陷编号：
+
+* **确认口径**：枚举**每套全局可行方案**，把两条缺陷各自换算到基准坐标系；只有所有
+  方案下二者都落在同一格，才确认同格。落在哪一格可以随方案而变（页面不把格子作为
+  固定依据保存），只要每套方案里两条记录同格即可。
+* **同一对只留一条**：缺陷对按“工序 id 小者在前”规范化存储，交换两道工序的填写
+  顺序命中同一行，不会产生重复记录。
+* **两种状态**：`已确认同格` 与 `待复核`。提交时不满足同格条件的一对会登记为待
+  复核；两种状态的记录都能在复查页和 `/api/wafers/<id>/pairs` 查询，并显示按当前
+  定位点即时算出的判定。
+* **补点 / 改点 / 撤点联动**：定位点写操作的同一事务里，只复核该片晶圆**已确认**
+  的缺陷对；失去同格依据（出现不同格方案或已无可行方案）的确认记录自动转为待复核。
+  待复核记录即使在新定位点下又能判为同格，也**不会自动恢复**，必须由复查员点“重新
+  确认”。
+* **原子性**：定位点变更与确认状态变化在同一个 SQLite 事务里提交；任一步失败整体
+  回滚，定位点与确认状态都沿用原值。
+
+相关接口：
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `POST /wafers/<id>/pairs` | 提交/重新判定一对缺陷（同格→确认，否则待复核） |
+| `POST /wafers/<id>/pairs/<pid>/reconfirm` | 对既有待复核记录重新确认 |
+| `POST /wafers/<id>/pairs/<pid>/delete` | 删除一条复查记录 |
+| `GET /api/wafers/<id>/pairs` | 查询已确认与待复核记录及即时判定 |
+
 ## 演示脚本
 
 `samples/6_封装.csv` 只有 C1 一个定位点，而基准图没有 C1——它靠与“沉积”共享
@@ -89,9 +122,10 @@ wafer_review/
 ├── app.py         Flask 应用工厂与路由
 ├── geometry.py    8 种 D4 变换与逆变换
 ├── csvparse.py    CSV 解析与校验
-├── db.py          SQLite schema（wafer / step / locator / defect）
-├── model.py       方案枚举、可行性、逐缺陷查询
-├── service.py     上传、更正、撤去（事务 + 回滚）
+├── db.py          SQLite schema（wafer / step / locator / defect / defect_pair）
+├── model.py       方案枚举、可行性、逐缺陷查询、跨工序同格判定
+├── pairs.py       同格复查记录：提交确认、撤点联动降级、重新确认
+├── service.py     上传、更正、撤去（事务 + 回滚，事务内刷新同格状态）
 ├── overlay.py     多工序叠加视图
 ├── gridview.py    网格渲染数据
 ├── demo.py        演示数据定义（CSV 与 samples/ 同源）
@@ -101,8 +135,8 @@ wafer_review/
 ## 自测
 
 ```bash
-python3 -m pytest tests -q          # 93 项单元/集成测试
-python3 scripts/selftest.py         # 脚本化走查关键操作（临时库，23 项检查）
+python3 -m pytest tests -q          # 121 项单元/集成测试
+python3 scripts/selftest.py         # 脚本化走查关键操作（临时库，45 项检查）
 BASE_URL=http://127.0.0.1:8000 python scripts/selftest.py   # 打真实服务
 ```
 
@@ -119,16 +153,28 @@ BASE_URL=http://127.0.0.1:8000 python scripts/selftest.py   # 打真实服务
 
 | 检查 | 结果 |
 | --- | --- |
-| `pytest tests -q` | 93 passed |
-| `python scripts/selftest.py`（Flask test_client） | 23/23 通过 |
-| `BASE_URL=… python scripts/selftest.py`（gunicorn 真实端口） | 23/23 通过 |
+| `pytest tests -q` | 121 passed |
+| `python scripts/selftest.py`（Flask test_client） | 45/45 通过 |
+| `BASE_URL=… python scripts/selftest.py`（gunicorn 真实端口） | 45/45 通过 |
 | 6 工序演示：可行方案数 / 待定判定 | 2 套；封装 D102、D104 待定 |
 | 撤去沉积 C1 后 | 方案数 8，封装全部缺陷转待定 |
 | 更正封装 C1 → (4,4) 后 | D104 变为确定 (5,5) |
 | 把封装 C1 更正到 (1,1) | 拒绝保存，定位点仍 (4,4)，原结果不变 |
+| 同格确认：光刻 D101 ⇄ 刻蚀 D101 | 每套方案同格，确认；交换填写顺序不产生第二条 |
+| 不同格对：光刻 D101 ⇄ 封装 D102 | 登记为待复核，页面与 API 可查 |
+| 撤去沉积 C1 | 受影响的封装确认对自动转待复核，未受影响的对保持确认 |
+| 补回 C1 后 | 仍待复核（不自动确认），人工“重新确认”后恢复 confirmed |
+| 无解更正 | 定位点与同格确认状态一并回滚，均沿用原值 |
 | 60×60 网格页面 | 上传 0.16 s、详情页 0.09 s（10 800 个格子） |
 
-`docker compose up --build` 未能在本环境实测：沙箱内没有 Docker/podman，也没有
-权限拉到容器运行时。Dockerfile 与 compose.yaml 按标准写法给出，启动命令已用
-gunicorn 在本机同参数（`wsgi:app`、`/healthz`、`WAFER_DB` 环境变量）验证通过。
+### Docker Compose
+
+`compose.yaml` 与 `Dockerfile` 已就绪：`docker compose up --build -d` 后访问
+`http://127.0.0.1:8000`，数据保存在命名卷 `wafer-data`。容器启动命令
+（`gunicorn wsgi:app`、`/healthz`、`WAFER_DB` 环境变量）已在本机用同参数的
+gunicorn 真实端口验证通过，selftest 的 `BASE_URL` 模式即针对该服务跑通。
+
+> 本沙箱内没有 Docker/podman 运行时（也无权安装），因此 `docker compose` 的构建与
+> 容器启动未能在此处实跑；Dockerfile 为标准 Python 3.12-slim 写法，构建上下文仅
+> 依赖 `requirements.txt` 与应用代码。
 

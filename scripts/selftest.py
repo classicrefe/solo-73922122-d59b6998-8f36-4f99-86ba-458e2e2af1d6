@@ -43,13 +43,16 @@ class Browser:
     def __init__(self, base_url: str | None) -> None:
         self.base_url = base_url
         self.client = None
+        # flash 提示存在签名 session cookie 里，跟随重定向时必须把 cookie 带回去
+        self.cookie_jar = urllib.request.HTTPCookieProcessor()
 
     def _send(self, method: str, path: str, body: bytes | None, headers: dict) -> tuple[int, str, dict]:
         if self.base_url:
-            url = self.base_url + path
+            # path 可能已是绝对 URL（跟随真实服务回的绝对 Location），不要再拼前缀
+            url = path if path.startswith(("http://", "https://")) else self.base_url + path
             req = urllib.request.Request(url, data=body, method=method, headers=headers)
-            # 不自动跟随重定向，才能拿到上传/改点后的 Location
-            opener = urllib.request.build_opener(_NoRedirect)
+            # 不自动跟随重定向，才能拿到上传/改点后的 Location；cookie jar 负责回传 session
+            opener = urllib.request.build_opener(self.cookie_jar, _NoRedirect)
             try:
                 with opener.open(req, timeout=20) as resp:
                     return resp.status, resp.read().decode("utf-8", "replace"), dict(resp.headers)
@@ -76,6 +79,21 @@ class Browser:
         )
         return status, text
 
+    def post_form_follow(self, path: str, fields: dict[str, str]) -> tuple[int, str]:
+        """POST 后再 GET 一次重定向目标，才能读到基于 session 的 flash 提示。"""
+        body = urllib.parse.urlencode(fields).encode()
+        status, text, headers = self._send(
+            "POST", path, body, {"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        if status in (302, 303) and headers.get("Location"):
+            location = headers["Location"]
+            if self.base_url and location.startswith("/"):
+                target = self.base_url + location
+            else:
+                # 绝对 URL（真实服务常回带主机名的 Location）直接使用
+                target = location
+            return self.get(target)
+        return status, text
     def post_files(
         self, path: str, fields: dict[str, str], files: list[tuple[str, str, bytes]]
     ) -> tuple[int, str, dict]:
@@ -125,6 +143,14 @@ def demo_names() -> list[str]:
     from wafer_review.demo import demo_samples
 
     return [name for name, _ in demo_samples()]
+
+
+def _review_wafer_fields() -> dict[str, str]:
+    return {
+        "name": "SELF-TEST-PAIR-REVIEW",
+        "grid_size": "8",
+        **{f"name_{i}": name for i, name in enumerate(demo_names(), start=1)},
+    }
 
 
 def api(browser: Browser, path: str):
@@ -238,6 +264,146 @@ def main() -> int:
         [kept["row"], kept["col"]] == [4, 4],
         f'{kept["row"]},{kept["col"]}',
     )
+
+    # ---- 同格复查：确认、撤点联动降级、补点后人工重新确认、删除 ----
+    # 用一张全新的演示片，避免上一节对定位点的更正影响本节的同格前提。
+    status, _body, headers = browser.post_files("/wafers", _review_wafer_fields(), demo_csvs())
+    match = re.search(r"/wafers/(\d+)$", headers.get("Location", ""))
+    check("复查用演示片建立成功", status in (302, 303) and match is not None, f"HTTP {status}")
+    review_id = int(match.group(1))
+    locators = api(browser, f"/api/wafers/{review_id}/locators")
+    steps_by_seq = {s["seq"]: s for s in locators["steps"]}
+
+    review_page = browser.get(f"/wafers/{review_id}")[1]
+    check("复查页含同格复查面板", "同格复查" in review_page)
+
+    # 1) 光刻 D101 ⇄ 刻蚀 D101：每套方案都同格 -> 确认
+    status, _ = browser.post_form(
+        f"/wafers/{review_id}/pairs",
+        {
+            "pair_step_a": str(steps_by_seq[1]["id"]),
+            "pair_defect_a": "D101",
+            "pair_step_b": str(steps_by_seq[2]["id"]),
+            "pair_defect_b": "D101",
+        },
+    )
+    check("同格提交重定向回复查页", status in (302, 303), f"HTTP {status}")
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    check("同格对已确认", len(pairs) == 1 and pairs[0]["status"] == "confirmed")
+    check("即时判定为每套方案同格", pairs[0]["live_verdict"] == "same_cell")
+    confirmed_id = pairs[0]["id"]
+
+    # 2) 交换填写顺序再交一次：同一对只保留一条
+    browser.post_form(
+        f"/wafers/{review_id}/pairs",
+        {
+            "pair_step_a": str(steps_by_seq[2]["id"]),
+            "pair_defect_a": "D101",
+            "pair_step_b": str(steps_by_seq[1]["id"]),
+            "pair_defect_b": "D101",
+        },
+    )
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    check("交换顺序不产生重复记录", len(pairs) == 1 and pairs[0]["id"] == confirmed_id)
+
+    # 3) 光刻 D101 ⇄ 封装 D101：当前也同格，确认后用撤点演示降级
+    browser.post_form(
+        f"/wafers/{review_id}/pairs",
+        {
+            "pair_step_a": str(steps_by_seq[1]["id"]),
+            "pair_defect_a": "D101",
+            "pair_step_b": str(steps_by_seq[6]["id"]),
+            "pair_defect_b": "D101",
+        },
+    )
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    packing_pair = next(p for p in pairs if p["step_b"] == "封装")
+    check("封装同格对已确认", packing_pair["status"] == "confirmed")
+
+    # 4) 不满足同格的一对 -> 待复核
+    status, page = browser.post_form_follow(
+        f"/wafers/{review_id}/pairs",
+        {
+            "pair_step_a": str(steps_by_seq[1]["id"]),
+            "pair_defect_a": "D101",
+            "pair_step_b": str(steps_by_seq[6]["id"]),
+            "pair_defect_b": "D102",
+        },
+    )
+    check("不同格提交登记为待复核", "待复核" in page)
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    pending_pair = next(p for p in pairs if p["defect_b"] == "D102" and p["step_b"] == "封装")
+    check("待复核记录可在接口查询", pending_pair["status"] == "pending")
+
+    # 5) 撤去沉积 C1：封装失去跨工序约束，已确认的封装对降为待复核；
+    #    光刻⇄刻蚀那条不受影响
+    c1_dep = _find_locator(steps_by_seq[3], "C1")
+    status, page = browser.post_form_follow(
+        f"/wafers/{review_id}/locators/{c1_dep['id']}/remove", {"step": "3", "did": "D101"}
+    )
+    check("撤点成功", status == 200, f"HTTP {status}")
+    check("撤点提示同格记录转待复核", "转为待复核" in page)
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    by_id = {p["id"]: p for p in pairs}
+    check("受影响的确认对降为待复核", by_id[packing_pair["id"]]["status"] == "pending")
+    check("未受影响的确认对保持确认", by_id[confirmed_id]["status"] == "confirmed")
+
+    # 6) 补回 C1：即使又能判同格，状态也不自动恢复，必须人工重新确认
+    status, _ = browser.post_form(
+        f"/wafers/{review_id}/locators",
+        {
+            "step_id": str(steps_by_seq[3]["id"]),
+            "step": "3",
+            "did": "D101",
+            "pid": "C1",
+            "row": "4",
+            "col": "5",
+        },
+    )
+    check("补点成功", status in (302, 303), f"HTTP {status}")
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    target = next(p for p in pairs if p["id"] == packing_pair["id"])
+    check("补点后仍为待复核（不自动确认）", target["status"] == "pending")
+    check("但即时判定已恢复同格", target["live_verdict"] == "same_cell")
+    status, page = browser.post_form_follow(
+        f"/wafers/{review_id}/pairs/{packing_pair['id']}/reconfirm", {}
+    )
+    check("重新确认成功", status == 200 and "已重新确认同格" in page)
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    check(
+        "重新确认后状态恢复 confirmed",
+        next(p for p in pairs if p["id"] == packing_pair["id"])["status"] == "confirmed",
+    )
+
+    # 7) 删除复查记录
+    status, _ = browser.post_form(
+        f"/wafers/{review_id}/pairs/{pending_pair['id']}/delete", {}
+    )
+    check("删除记录请求成功", status in (302, 303), f"HTTP {status}")
+    pairs = api(browser, f"/api/wafers/{review_id}/pairs")["pairs"]
+    check("删除后剩余两条记录", len(pairs) == 2)
+
+    # 8) 无效输入：同一道工序 / 不存在的缺陷
+    status, page = browser.post_form_follow(
+        f"/wafers/{review_id}/pairs",
+        {
+            "pair_step_a": str(steps_by_seq[1]["id"]),
+            "pair_defect_a": "D101",
+            "pair_step_b": str(steps_by_seq[1]["id"]),
+            "pair_defect_b": "D102",
+        },
+    )
+    check("同一道工序被拒绝", "两道不同的工序" in page)
+    status, page = browser.post_form_follow(
+        f"/wafers/{review_id}/pairs",
+        {
+            "pair_step_a": str(steps_by_seq[1]["id"]),
+            "pair_defect_a": "NO-SUCH",
+            "pair_step_b": str(steps_by_seq[2]["id"]),
+            "pair_defect_b": "D101",
+        },
+    )
+    check("不存在的缺陷被拒绝", "没有缺陷 NO-SUCH" in page)
 
     failed = [c for c in CHECKS if not c[1]]
     print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} 项通过")

@@ -50,9 +50,29 @@ CREATE TABLE IF NOT EXISTS defect (
     UNIQUE (step_id, did)
 );
 
+-- 跨工序“同格”复查记录。两条缺陷必须来自同片晶圆的不同工序；按工序 id
+-- 规范化存小者在前，因此同一对只保留一条，交换填写顺序命中同一行。
+-- status: confirmed=已确认同格；pending=待复核（曾确认但当前定位点下失去
+-- 同格依据，或提交时本就不满足“每套方案都同格”）。
+CREATE TABLE IF NOT EXISTS defect_pair (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    wafer_id     INTEGER NOT NULL REFERENCES wafer(id) ON DELETE CASCADE,
+    step_id_a    INTEGER NOT NULL REFERENCES step(id) ON DELETE CASCADE,
+    defect_a     TEXT    NOT NULL,
+    step_id_b    INTEGER NOT NULL REFERENCES step(id) ON DELETE CASCADE,
+    defect_b     TEXT    NOT NULL,
+    status       TEXT    NOT NULL CHECK (status IN ('confirmed', 'pending')),
+    created_at   TEXT    NOT NULL,
+    updated_at   TEXT    NOT NULL,
+    CHECK (step_id_a <> step_id_b),
+    CHECK (step_id_a < step_id_b),
+    UNIQUE (wafer_id, step_id_a, defect_a, step_id_b, defect_b)
+);
+
 CREATE INDEX IF NOT EXISTS idx_step_wafer ON step(wafer_id, seq);
 CREATE INDEX IF NOT EXISTS idx_locator_step ON locator(step_id);
 CREATE INDEX IF NOT EXISTS idx_defect_step ON defect(step_id);
+CREATE INDEX IF NOT EXISTS idx_pair_wafer ON defect_pair(wafer_id, status);
 """
 
 

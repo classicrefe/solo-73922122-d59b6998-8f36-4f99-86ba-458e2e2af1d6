@@ -266,3 +266,20 @@ code { background: rgba(90, 169, 255, .12); padding: 1px 5px; border-radius: 5px
 .legend { display: flex; gap: 14px; align-items: center; margin-top: 10px; font-size: 12.5px; }
 .legend .mark { writing-mode: horizontal-tb; padding: 2px 6px; }
 .muted-mark { opacity: .38; text-decoration: line-through; }
+
+.pair-form {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin: 12px 0 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(13, 20, 32, .5);
+}
+.pair-field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 260px; }
+.pair-field > span { font-size: 12.5px; color: var(--muted); }
+.pair-field select, .pair-field input { width: 100%; }
+.pair-actions { display: flex; gap: 14px; align-items: center; white-space: nowrap; }
+.pair-actions form { margin: 0; }
